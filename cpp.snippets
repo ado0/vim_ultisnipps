@@ -1,0 +1,532 @@
+priority -50
+
+extends c
+
+# We want to overwrite everything in parent ft.
+priority -49
+###########################################################################
+#			    Global functions 				  #
+###########################################################################
+
+global !p
+
+def write_docstring_args(arglist, snip):
+	args = str(arglist).split(',')
+
+	if len(args) > 1:
+		c = 0
+		for arg in args:
+			if c == 0:
+				snip.rv += arg
+				c = 1
+			else:
+				snip += '*       : %s' % arg.strip()
+	else:
+		snip.rv = args[0]
+
+NORMAL  = 0x1
+DOXYGEN = 0x2
+SPHINX  = 0x3
+GOOGLE  = 0x4
+NUMPY   = 0x5
+JEDI    = 0x6
+
+SINGLE_QUOTES = "'"
+DOUBLE_QUOTES = '"'
+
+
+class Arg(object):
+	def __init__(self, arg):
+		self.arg = arg
+		self.name = arg.split('=')[0].strip()
+
+	def __str__(self):
+		return self.name
+
+	def __unicode__(self):
+		return self.name
+
+	def is_kwarg(self):
+		return '=' in self.arg
+
+
+def get_args(arglist):
+	args = [Arg(arg) for arg in arglist.split(',') if arg]
+	args = [arg for arg in args if arg.name != 'self']
+
+	return args
+
+
+def get_quoting_style(snip):
+	style = snip.opt("g:ultisnips_python_quoting_style", "double")
+	if style == 'single':
+		return SINGLE_QUOTES
+	return DOUBLE_QUOTES
+
+def triple_quotes(snip):
+	style = snip.opt("g:ultisnips_python_triple_quoting_style")
+	if not style:
+		return get_quoting_style(snip) * 3
+	return (SINGLE_QUOTES if style == 'single' else DOUBLE_QUOTES) * 3
+
+def triple_quotes_handle_trailing(snip, quoting_style):
+	"""
+	Generate triple quoted strings and handle any trailing quote char,
+	which might be there from some autoclose/autopair plugin,
+	i.e. when expanding ``"|"``.
+	"""
+	if not snip.c:
+		# Do this only once, otherwise the following error would happen:
+		# RuntimeError: The snippets content did not converge: …
+		_, col = vim.current.window.cursor
+		line = vim.current.line
+
+		# Handle already existing quote chars after the trigger.
+		_ret = quoting_style * 3
+		while True:
+			try:
+				nextc = line[col]
+			except IndexError:
+				break
+			if nextc == quoting_style and len(_ret):
+				_ret = _ret[1:]
+				col = col+1
+			else:
+				break
+		snip.rv = _ret
+	else:
+		snip.rv = snip.c
+
+def get_style(snip):
+	style = snip.opt("g:ultisnips_python_style", "normal")
+
+	if    style == "doxygen": return DOXYGEN
+	elif  style == "sphinx": return SPHINX
+	elif  style == "google": return GOOGLE
+	elif  style == "numpy": return NUMPY
+	elif  style == "jedi": return JEDI
+	else: return NORMAL
+
+
+def format_arg(arg, style):
+	if style == DOXYGEN:
+		return "@param %s TODO" % arg
+	elif style == SPHINX:
+		return ":param %s: TODO" % arg
+	elif style == NORMAL:
+		return ":%s: TODO" % arg
+	elif style == GOOGLE:
+		return "%s (TODO): TODO" % arg
+	elif style == JEDI:
+		return ":type %s: TODO" % arg
+	elif style == NUMPY:
+		return "%s : TODO" % arg
+
+
+def format_return(style):
+	if style == DOXYGEN:
+		return "@return: TODO"
+	elif style in (NORMAL, SPHINX, JEDI):
+		return ":returns: TODO"
+	elif style == GOOGLE:
+		return "Returns: TODO"
+
+
+def write_docstring_args(args, snip):
+	if not args:
+		snip.rv += ' {0}'.format(triple_quotes(snip))
+		return
+
+	snip.rv += '\n' + snip.mkline('', indent='')
+
+	style = get_style(snip)
+
+	if style == GOOGLE:
+		write_google_docstring_args(args, snip)
+	elif style == NUMPY:
+		write_numpy_docstring_args(args, snip)
+	else:
+		for arg in args:
+			snip += format_arg(arg, style)
+
+
+def write_google_docstring_args(args, snip):
+	kwargs = [arg for arg in args if arg.is_kwarg()]
+	args = [arg for arg in args if not arg.is_kwarg()]
+
+	if args:
+		snip += "Args:"
+		snip.shift()
+		for arg in args:
+			snip += format_arg(arg, GOOGLE)
+		snip.unshift()
+		snip.rv += '\n' + snip.mkline('', indent='')
+
+	if kwargs:
+		snip += "Kwargs:"
+		snip.shift()
+		for kwarg in kwargs:
+			snip += format_arg(kwarg, GOOGLE)
+		snip.unshift()
+		snip.rv += '\n' + snip.mkline('', indent='')
+
+
+def write_numpy_docstring_args(args, snip):
+	if args:
+		snip += "Parameters"
+		snip += "----------"
+
+	kwargs = [arg for arg in args if arg.is_kwarg()]
+	args = [arg for arg in args if not arg.is_kwarg()]
+
+	if args:
+		for arg in args:
+			snip += format_arg(arg, NUMPY)
+	if kwargs:
+		for kwarg in kwargs:
+			snip += format_arg(kwarg, NUMPY) + ', optional'
+	snip.rv += '\n' + snip.mkline('', indent='')
+
+import re
+
+def write_getter(args, parents, snip):
+	parents = [p.strip() for p in parents.split(";\n")]
+	parents = [p for p in parents if p != 'object']
+
+	for p in parents:
+		p = re.sub('[;]', '', p)
+		b = p.split()
+		if len(b) > 1:
+			if b[len(b) - 1][0] != '_':
+				snip += "virtual " + b[0] + " get_" + b[len(b) \
+				- 1] + "() const { return " + b[len(b) - 1] +  \
+				"; }"
+			else:
+				c = b[len(b) - 1][1:]
+				snip += "virtual " + b[0] + " " + c +          \
+				"() const { return " + b[len(b) - 1] + "; }"
+
+	for arg in args:
+		snip += "self._%s = %s" % (arg, arg)
+
+
+def write_setter(args, parents, snip):
+	parents = [p.strip() for p in parents.split(";\n")]
+	parents = [p for p in parents if p != 'object']
+
+	for p in parents:
+		p = re.sub('[;]', '', p)
+		b = p.split()
+		if len(b) > 1:
+			if b[len(b) - 1][0] != '_':
+				snip += "virtual " + b[0] + "& set_" + b[len(b)\
+				- 1] + "() { return " + b[len(b) - 1] + "; }"
+			else:
+				c = b[len(b) - 1][1:]
+				snip += "virtual " + b[0] + "& " + c +         \
+				"() { return " + b[len(b) - 1] + "; }"
+
+	for arg in args:
+		snip += "self._%s = %s" % (arg, arg)
+
+
+def write_constructor(args, parents, snip):
+	parents = [p.strip() for p in parents.split(";\n")]
+	parents = [p for p in parents if p != 'object']
+
+	for p in parents:
+		p = re.sub('[;]', '', p)
+		b = p.split()
+		if len(b) > 1:
+			if p != parents[0]:
+				snip += ",const " + b[0] + "& " + b[len(b) - 1]\
+				+ "_from"
+			else:
+				snip += " const " + b[0] + "& " + b[len(b) - 1]\
+				+ "_from"
+
+	for arg in args:
+		snip += "self._%s = %s" % (arg, arg)
+
+def write_initializer_list(args, parents, snip):
+	parents = [p.strip() for p in parents.split(";\n")]
+	parents = [p for p in parents if p != 'object']
+
+	for p in parents:
+		p = re.sub('[;]', '', p)
+		b = p.split()
+		if len(b) > 1:
+			if p != parents[0]:
+				snip += ", " + b[len(b) - 1] + "{" + b[len(b) -\
+				1] + "_from}"
+			else:
+				snip += "  " + b[len(b) - 1] + "{" + b[len(b) -\
+				1] + "_from}"
+
+	for arg in args:
+		snip += "self._%s = %s" % (arg, arg)
+
+def write_initializer_list_copy(args, parents, snip):
+	parents = [p.strip() for p in parents.split(";\n")]
+	parents = [p for p in parents if p != 'object']
+
+	for p in parents:
+		p = re.sub('[;]', '', p)
+		b = p.split()
+		if len(b) > 1:
+			if p != parents[0]:
+				snip += ", " + b[len(b) - 1] + "{from."        \
+				+ b[len(b) - 1] + "}"
+			else:
+				snip += "  " + b[len(b) - 1] + "{from."        \
+				+ b[len(b) - 1] + "}"
+
+	for arg in args:
+		snip += "self._%s = %s" % (arg, arg)
+
+def write_shifts(args, parents, snip):
+	parents = [p.strip() for p in parents.split(";\n")]
+	parents = [p for p in parents if p != 'object']
+
+	for p in parents:
+		p = re.sub('[;]', '', p)
+		b = p.split()
+		if len(b) > 1:
+			snip += "<< obj." + b[len(b)\
+			- 1] + " << \' \'"
+
+	for arg in args:
+		snip += "self._%s = %s" % (arg, arg)
+
+def write_equ(args, parents, snip):
+	parents = [p.strip() for p in parents.split(";\n")]
+	parents = [p for p in parents if p != 'object']
+
+	for p in parents:
+		p = re.sub('[;]', '', p)
+		b = p.split()
+		if len(b) > 1:
+			if p != parents[0]:
+				snip += "&& this->" + b[len(b) - 1] + " == obj."        \
+				+ b[len(b) - 1] 
+			else:
+				snip += "   this->" + b[len(b) - 1] + " == obj."        \
+				+ b[len(b) - 1]
+
+	for arg in args:
+		snip += "self._%s = %s" % (arg, arg)
+
+def write_clone(args, parents, snip):
+	parents = [p.strip() for p in parents.split(";\n")]
+	parents = [p for p in parents if p != 'object']
+
+	for p in parents:
+		p = re.sub('[;]', '', p)
+		b = p.split()
+		if len(b) > 1:
+			snip += "this->" + b[len(b)\
+			- 1] + " = obj." + b[len(b) - 1] + ";"
+
+	for arg in args:
+		snip += "self._%s = %s" % (arg, arg)
+
+def write_slots_args(args, snip):
+	args = ['"_%s"' % arg for arg in args]
+	snip += '__slots__ = (%s,)' % ', '.join(args)
+
+
+def write_function_docstring(t, snip):
+	"""
+	Writes a function docstring with the current style.
+
+	:param t: The values of the placeholders
+	:param snip: UltiSnips.TextObjects.SnippetUtil object instance
+	"""
+	snip.rv = ""
+	snip >> 1
+
+	args = get_args(t[2])
+	if args:
+		write_docstring_args(args, snip)
+
+	style = get_style(snip)
+
+	if style == NUMPY:
+		snip += 'Returns'
+		snip += '-------'
+		snip += 'TODO'
+	else:
+		snip += format_return(style)
+	snip.rv += '\n' + snip.mkline('', indent='')
+	snip += triple_quotes(snip)
+
+def get_dir_and_file_name(snip):
+	return os.getcwd().split(os.sep)[-1] + '.' + snip.basename
+
+endglobal
+
+###########################################################################
+#                            TextMate Snippets                            #
+###########################################################################
+snippet beginend "$1.begin(), $1.end() (beginend)"
+${1:v}${1/^.*?(-)?(>)?$/(?2::(?1:>:.))/}begin(), $1${1/^.*?(-)?(>)?$/(?2::(?1:>:.))/}end()
+endsnippet
+
+
+snippet class "class with docstrings" b
+class ${1:name}
+{
+	private:
+	${2:object}
+
+	public:
+		$1() {}
+
+		$1(const $1& from):`!p snip >> 3
+args = get_args(t[4])
+write_initializer_list_copy(args, t[2], snip)`
+		{} // copy
+
+		$1($1&& from):`!p snip >> 3
+args = get_args(t[4])
+write_initializer_list_copy(args, t[2], snip)`
+		{} // move copy
+
+		$1(`!p snip >> 3
+args = get_args(t[4])
+write_constructor(args, t[2], snip)`):`!p snip >> 3
+args = get_args(t[4])
+write_initializer_list(args, t[2], snip)`
+		{} // constructor
+
+		~$1()
+		{} // destructor
+
+		$1& operator=(const $1&);
+		$1& operator=($1&&);
+		bool operator==(const $1&);
+`!p snip >> 2
+args = get_args(t[4])
+write_getter(args, t[2], snip)`
+`!p snip >> 2
+args = get_args(t[4])
+write_setter(args, t[2], snip)`
+
+		friend std::ostream& operator<<(std::ostream&, const $1&);
+};
+
+$1& $1::operator=(const $1& obj)
+{
+	if(this != &obj)
+	{`!p snip >> 2
+args = get_args(t[4])
+write_clone(args, t[2], snip)`
+	}
+
+	return *this;
+}
+
+$1& $1::operator=($1&& obj)
+{
+	if(this != &obj)
+	{`!p snip >> 2
+args = get_args(t[4])
+write_clone(args, t[2], snip)`
+	}
+
+	return *this;
+}
+
+bool $1::operator==(const $1& obj)
+{
+	return`!p snip >> 2
+args = get_args(t[4])
+write_equ(args, t[2], snip)`;
+}
+
+std::ostream& operator<<(std::ostream& out, const $1& obj)
+{
+	return out`!p snip >> 2
+args = get_args(t[4])
+write_shifts(args, t[2], snip)`;
+}
+
+endsnippet
+
+snippet iface "interface"
+class ${1:`!p snip.rv = ''.join(x for x in snip.basename.title() if x.isalnum()) or "UNTITLED"`} {
+public:
+	virtual ~$1() = default;
+${0}
+};
+endsnippet
+
+snippet ns "namespace .. (namespace)"
+namespace${1/.+/ /m}${1:`!p snip.rv = snip.basename or "name"`}
+{
+	${VISUAL}$0
+}${1/.+/ \/* /m}$1${1/.+/ *\/ /m}
+endsnippet
+
+snippet itera
+for(auto it = begin(${1:}); it != end($1); ++it)
+{
+	${0}
+}
+endsnippet
+
+snippet readfile "read file (readF)"
+std::vector<char> v;
+if (FILE *fp = fopen(${1:"filename"}, "r"))
+{
+	char buf[1024];
+	while(size_t len = fread(buf, 1, sizeof(buf), fp))
+		v.insert(v.end(), buf, buf + len);
+	fclose(fp);
+}
+endsnippet
+
+snippet map "std::map (map)"
+std::map<${1:key}, ${2:value}> map$0;
+endsnippet
+
+snippet vector "std::vector (v)"
+std::vector<${1:char}> v$0;
+endsnippet
+
+snippet tp "template <typename ..> (template)"
+template <typename ${1:_InputIter}>
+endsnippet
+
+snippet cla "An entire .h generator" b
+#ifndef ${2:`!v substitute(vim_snippets#Filename('$1_H','ClassName'),'.*','\U&\E','')`}
+#define $2
+
+class ${1:`!v substitute( substitute(vim_snippets#Filename('$1','ClassName'),'^.','\u&',''), '_\(\w\)', '\u\1', 'g')`}
+{
+private:
+	$3
+
+public:
+	$1();
+	irtual ~$1();
+};
+
+#endif /* $2 */
+endsnippet
+
+
+snippet fnc "Basic c++ doxygen function template" b
+/**
+* @brief: ${4:brief}
+*
+* @param: `!p write_docstring_args(t[3],snip)`
+*
+* @return: `!p snip.rv = t[1]`
+*/
+${1:ReturnType} ${2:FunctionName}(${3:param})
+{
+	${0:FunctionBody}
+}
+endsnippet
+# vim:ft=snippets:
